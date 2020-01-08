@@ -2390,16 +2390,13 @@ public class HRegion implements HeapSize { // , Writable{
         try {
           rowLock = getRowLockInternal(mutation.getRow(), shouldBlock);
         } catch (IOException ioe) {
-          LOG.warn("Failed getting lock in batch put, row="
-            + Bytes.toStringBinary(mutation.getRow()), ioe);
+//          LOG.warn("Failed getting lock in batch put, row="
+//            + Bytes.toStringBinary(mutation.getRow()), ioe);
+          throw new IOException("Failed getting lock in batch put, row="
+                  + Bytes.toStringBinary(mutation.getRow()), ioe);
         }
-        if (rowLock == null) {
-          // We failed to grab another lock
-          assert !shouldBlock : "Should never fail to get lock when blocking";
-          break; // stop acquiring more rows for this batch
-        } else {
-          acquiredRowLocks.add(rowLock);
-        }
+
+        acquiredRowLocks.add(rowLock);
 
         lastIndexExclusive++;
         numReadyToWrite++;
@@ -3474,6 +3471,47 @@ public class HRegion implements HeapSize { // , Writable{
     } finally {
       closeRegionOperation();
     }
+  }
+
+  /**
+   * A version of getRowLock(byte[], boolean) to use when a region operation has already been
+   * started (the calling thread has already acquired the region-close-guard lock).
+   */
+  protected RowLock getRowLockInternal(byte[] row, boolean waitForLock) throws IOException {
+    checkRow(row, "row lock");
+    HashedBytes rowKey = new HashedBytes(row);
+    RowLockContext rowLockContext = new RowLockContext(rowKey);
+
+    // loop until we acquire the row lock (unless !waitForLock)
+    while (true) {
+      RowLockContext existingContext = lockedRows.putIfAbsent(rowKey, rowLockContext);
+      if (existingContext == null) {
+        // Row is not already locked by any thread, use newly created context.
+        break;
+      } else if (existingContext.ownedByCurrentThread()) {
+        // Row is already locked by current thread, reuse existing context instead.
+        rowLockContext = existingContext;
+        break;
+      } else {
+        if (!waitForLock) {
+          return null;
+        }
+        try {
+          // Row is already locked by some other thread, give up or wait for it
+          if (!existingContext.latch.await(this.rowLockWaitDuration, TimeUnit.MILLISECONDS)) {
+            throw new IOException("Timed out waiting for lock for row: " + rowKey);
+          }
+        } catch (InterruptedException ie) {
+          LOG.warn("Thread interrupted waiting for lock on row: " + rowKey);
+          InterruptedIOException iie = new InterruptedIOException();
+          iie.initCause(ie);
+          throw iie;
+        }
+      }
+    }
+
+    // allocate new lock for this thread
+    return rowLockContext.newLock();
   }
 
   /**
