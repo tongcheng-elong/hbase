@@ -2390,13 +2390,19 @@ public class HRegion implements HeapSize { // , Writable{
         try {
           rowLock = getRowLockInternal(mutation.getRow(), shouldBlock);
         } catch (IOException ioe) {
-//          LOG.warn("Failed getting lock in batch put, row="
-//            + Bytes.toStringBinary(mutation.getRow()), ioe);
+          LOG.warn("Failed getting lock in batch put, row="
+            + Bytes.toStringBinary(mutation.getRow()), ioe);
           throw new IOException("Failed getting lock in batch put, row="
                   + Bytes.toStringBinary(mutation.getRow()), ioe);
         }
 
-        acquiredRowLocks.add(rowLock);
+        if (rowLock == null) {
+          // We failed to grab another lock
+          assert !shouldBlock : "Should never fail to get lock when blocking";
+          break; // stop acquiring more rows for this batch
+        } else {
+          acquiredRowLocks.add(rowLock);
+        }
 
         lastIndexExclusive++;
         numReadyToWrite++;
